@@ -1,0 +1,26 @@
+services:
+  backup:
+    image: postgres:15
+    restart: unless-stopped
+    env_file:
+      - stack.env
+    volumes:
+      - /mnt/sda/backups/financer:/backups
+    environment:
+      TZ: "America/Sao_Paulo"
+    entrypoint: |
+      /bin/sh -c '
+      while true; do
+        echo "Starting backup at $(date)"
+        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h $${POSTGRES_HOST:-postgres} -U $$POSTGRES_USER $$POSTGRES_DB | gzip > /backups/backup_$${POSTGRES_DB}_$(date +%Y%m%d_%H%M%S).sql.gz
+        echo "Backup completed at $(date)"
+        # Keep only last 4 backups
+        ls -t /backups/backup_$${POSTGRES_DB}_*.sql.gz | tail -n +5 | xargs -r rm
+        sleep $${BACKUP_INTERVAL:-604800}
+      done'
+    networks:
+      - financer-services_database
+
+networks:
+  financer-services_database:
+    external: true
