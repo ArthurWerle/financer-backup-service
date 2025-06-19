@@ -32,13 +32,25 @@ services:
       /bin/sh -c '
       apk add --no-cache aws-cli inotify-tools bash
 
+      BUCKET="$$S3_BUCKET"
+      echo "S3_BUCKET is: $BUCKET"
+
+
       # Function to sync backups
       sync_backups() {
         echo "Syncing backups to S3..."
-        aws s3 sync /backups s3://$$S3_BUCKET/ \
+        echo "Full command: aws s3 sync /backups s3://$BUCKET/ --include backup_*.sql.gz --exclude *"
+        echo "Files in /backups:"
+        ls -la /backups/
+
+        if aws s3 sync /backups s3://$BUCKET/ \
           --include "backup_*.sql.gz" \
-          --exclude "*"
-        echo "Sync completed"
+          --exclude "*" \
+          --debug; then
+          echo "Sync completed"
+        else
+          echo "Sync FAILED" >&2
+        fi
       }
 
       # Initial sync on startup
@@ -48,6 +60,7 @@ services:
       inotifywait -m -e close_write /backups --format "%f" | while read filename; do
         if [[ "$$filename" == backup_*.sql.gz ]]; then
           echo "New backup detected: $$filename"
+          sleep 2  # Wait a bit to ensure file is completely written
           sync_backups
         fi
       done'
