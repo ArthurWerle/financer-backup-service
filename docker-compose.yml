@@ -1,87 +1,55 @@
 services:
-  backup:
+  backup-orchestrator:
     image: postgres:15
     restart: unless-stopped
     env_file:
       - stack.env
-    volumes:
-      - /mnt/sda/backups/financer:/backups
     environment:
       TZ: "America/Sao_Paulo"
-    entrypoint: |
-      /bin/sh -c '
-      while true; do
-        echo "Starting backup at $(date)"
-        PGPASSWORD=$$POSTGRES_PASSWORD pg_dump -h $${POSTGRES_HOST:-postgres} -U $$POSTGRES_USER $$POSTGRES_DB | gzip > /backups/backup_$${POSTGRES_DB}_$(date +%Y%m%d_%H%M%S).sql.gz
-        echo "Backup completed at $(date)"
-        # Keep only last 4 backups
-        ls -t /backups/backup_$${POSTGRES_DB}_*.sql.gz | tail -n +5 | xargs -r rm
-        sleep $${BACKUP_INTERVAL:-604800}
-      done'
+      CONFIG_FILE: "/backups/config/backups.yml"
+      BACKUP_DIR: "/backups"
+      LOG_DIR: "/backups/logs"
+    volumes:
+      # Host backup directory
+      - /mnt/sda/backups/financer:/backups
+      # Configuration files
+      - ./backups.yml:/backups/config/backups.yml:ro
+      - ./backup.sh:/backup.sh:ro
+      # Docker socket for volume backups
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - financer-services_database
-
-  s3-uploader:
-    image: alpine:latest
-    restart: unless-stopped
-    env_file:
-      - stack.env
-    volumes:
-      - /mnt/sda/backups/financer:/backups
-      - ./sync-script.sh:/sync-script.sh:ro
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e  # Exit on any error
-
-        echo "=== Starting S3 sync script ==="
-        echo "Current directory: $(pwd)"
-        echo "Script location: $0"
-
-        apk add --no-cache aws-cli inotify-tools bash || {
+    entrypoint: |
+      /bin/bash -c '
+      # Install required tools
+      apt-get update && apt-get install -y --no-install-recommends \
+        awscli \
+        docker.io \
+        cron \
+        bash \
+        >/dev/null 2>&1 || {
           echo "Failed to install packages" >&2
           exit 1
         }
 
-        echo "S3_BUCKET is: $$S3_BUCKET"
+      # Make backup script executable
+      chmod +x /backup.sh
 
-        # Check if S3_BUCKET is set
-        if [ -z "$$S3_BUCKET" ]; then
-          echo "ERROR: S3_BUCKET environment variable is not set!" >&2
-          exit 1
-        fi
+      # Create cron job for daily backup at 3am
+      CRON_JOB="0 3 * * * /backup.sh"
+      echo "$$CRON_JOB" | crontab -
 
-        # Check if backups directory exists
-        if [ ! -d "/backups" ]; then
-          echo "ERROR: /backups directory does not exist!" >&2
-          exit 1
-        fi
+      echo "=========================================="
+      echo "Backup orchestrator started"
+      echo "Timezone: $$TZ"
+      echo "Backup directory: $$BACKUP_DIR"
+      echo "Configuration file: $$CONFIG_FILE"
+      echo "Cron job: $$CRON_JOB"
+      echo "=========================================="
 
-        sync_backups() {
-          echo "=== Syncing backups to S3 ==="
-          echo "Command: aws s3 sync /backups s3://$$S3_BUCKET/ --include backup_*.sql.gz --exclude *"
-          if aws s3 sync /backups s3://$$S3_BUCKET/ --include "backup_*.sql.gz" --exclude "*"; then
-            echo "Sync completed"
-          else
-            echo "Sync FAILED" >&2
-          fi
-        }
-
-        echo "=== Performing initial sync ==="
-        sync_backups || {
-          echo "Initial sync failed, but continuing..." >&2
-        }
-
-        echo "=== Starting file watcher ==="
-        inotifywait -m -e close_write /backups --format "%f" | while read filename; do
-          if [[ "$$filename" == backup_*.sql.gz ]]; then
-            echo "New backup detected: $$filename"
-            sync_backups || echo "Sync failed for $$filename" >&2
-          else
-            echo "Ignoring file: $$filename"
-          fi
-        done
+      # Start cron daemon in foreground
+      exec cron -f
+      '
 
 networks:
   financer-services_database:

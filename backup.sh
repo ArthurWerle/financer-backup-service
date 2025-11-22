@@ -1,0 +1,283 @@
+#!/bin/bash
+
+# Unified Backup Orchestration Script
+# Handles database backups (pg_dump) and volume backups (tar)
+# Syncs to S3 and maintains retention policy
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Configuration
+CONFIG_FILE="${CONFIG_FILE:-/backups/config/backups.yml}"
+BACKUP_DIR="${BACKUP_DIR:-/backups}"
+LOG_DIR="${LOG_DIR:-/backups/logs}"
+
+# Ensure log directory exists
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/backup_$(date +%Y%m%d_%H%M%S).log"
+
+# Logging functions
+log() {
+    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+log_success() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] ✓ $1${NC}" | tee -a "$LOG_FILE"
+}
+
+log_error() {
+    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ✗ $1${NC}" | tee -a "$LOG_FILE"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] ⚠ $1${NC}" | tee -a "$LOG_FILE"
+}
+
+# Function to parse YAML with environment variable substitution
+parse_yaml() {
+    local yaml_file="$1"
+    local key="$2"
+
+    if [ ! -f "$yaml_file" ]; then
+        log_error "Configuration file not found: $yaml_file"
+        return 1
+    fi
+
+    # Simple YAML parsing - more robust solutions would use 'yq'
+    grep "^[[:space:]]*$key:" "$yaml_file" | head -1 | sed -e "s/.*$key:[[:space:]]*//;s/[[:space:]]*$//" | envsubst
+}
+
+# Function to validate database connection
+validate_db_connection() {
+    local host="$1"
+    local port="$2"
+    local user="$3"
+    local password="$4"
+    local db="$5"
+
+    export PGPASSWORD="$password"
+    if pg_isready -h "$host" -p "$port" -U "$user" &>/dev/null; then
+        log_success "Database connection validated: $host:$port/$db"
+        return 0
+    else
+        log_error "Failed to connect to database: $host:$port/$db"
+        return 1
+    fi
+}
+
+# Function to perform database backup
+backup_database() {
+    local name="$1"
+    local host="$2"
+    local port="$3"
+    local user="$4"
+    local password="$5"
+    local database="$6"
+    local backup_path="$7"
+
+    log "Starting database backup: $name ($database@$host:$port)"
+
+    local backup_file="$backup_path/${name}_$(date +%Y%m%d_%H%M%S).sql.gz"
+
+    export PGPASSWORD="$password"
+    if pg_dump -h "$host" -p "$port" -U "$user" "$database" 2>>"$LOG_FILE" | gzip > "$backup_file"; then
+        local size=$(du -h "$backup_file" | cut -f1)
+        log_success "Database backup completed: $name ($size)"
+        echo "$backup_file"
+        return 0
+    else
+        log_error "Database backup failed: $name"
+        return 1
+    fi
+}
+
+# Function to perform volume backup
+backup_volume() {
+    local name="$1"
+    local volume_name="$2"
+    local backup_path="$3"
+
+    log "Starting volume backup: $name ($volume_name)"
+
+    local backup_file="$backup_path/${name}_volume_$(date +%Y%m%d_%H%M%S).tar.gz"
+
+    if docker run --rm \
+        -v "$volume_name:/volume" \
+        -v "$backup_path:/backup" \
+        alpine:latest \
+        tar czf "/backup/$(basename "$backup_file")" -C /volume . 2>>"$LOG_FILE"; then
+        local size=$(du -h "$backup_file" | cut -f1)
+        log_success "Volume backup completed: $name ($size)"
+        echo "$backup_file"
+        return 0
+    else
+        log_error "Volume backup failed: $name"
+        return 1
+    fi
+}
+
+# Function to sync backups to S3
+sync_to_s3() {
+    local backup_date="$1"
+    local s3_bucket="$2"
+
+    if [ -z "$s3_bucket" ]; then
+        log_warning "S3_BUCKET not configured, skipping S3 sync"
+        return 0
+    fi
+
+    log "Starting S3 sync for backup: $backup_date"
+
+    # Sync backup date directory to S3
+    local backup_date_dir="$BACKUP_DIR/$backup_date"
+
+    if [ ! -d "$backup_date_dir" ]; then
+        log_error "Backup directory not found: $backup_date_dir"
+        return 1
+    fi
+
+    if aws s3 sync "$backup_date_dir" "s3://$s3_bucket/$backup_date/" \
+        --region "${AWS_DEFAULT_REGION:-us-east-1}" 2>>"$LOG_FILE"; then
+        log_success "S3 sync completed for backup: $backup_date"
+        return 0
+    else
+        log_error "S3 sync failed for backup: $backup_date"
+        return 1
+    fi
+}
+
+# Function to apply retention policy
+apply_retention_policy() {
+    local retention_count="$1"
+
+    log "Applying retention policy: keeping $retention_count backups"
+
+    # Find all backup date directories (format: YYYYMMDD_HHMMSS)
+    local backup_dirs=$(find "$BACKUP_DIR" -maxdepth 1 -type d -name "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]" | sort -rn)
+
+    local count=0
+    while IFS= read -r dir; do
+        count=$((count + 1))
+        if [ $count -gt "$retention_count" ]; then
+            log "Removing old backup: $dir"
+            rm -rf "$dir"
+            log_success "Deleted backup: $(basename "$dir")"
+        fi
+    done <<< "$backup_dirs"
+}
+
+# Main backup execution
+main() {
+    log "=========================================="
+    log "Starting unified backup orchestration"
+    log "=========================================="
+
+    # Check for required tools
+    if ! command -v pg_dump &> /dev/null; then
+        log_error "pg_dump not found. Please install PostgreSQL client tools."
+        exit 1
+    fi
+
+    if ! command -v aws &> /dev/null; then
+        log_error "AWS CLI not found. Please install aws-cli."
+        exit 1
+    fi
+
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker not found. Please install Docker."
+        exit 1
+    fi
+
+    # Create timestamped backup directory
+    local backup_timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_date_dir="$BACKUP_DIR/$backup_timestamp"
+    mkdir -p "$backup_date_dir"
+
+    log "Backup timestamp: $backup_timestamp"
+    log "Backup directory: $backup_date_dir"
+
+    # Track backup success/failure
+    local backup_failed=0
+
+    # ========== Database Backups ==========
+    log "========== Starting Database Backups =========="
+
+    # Backup mordor database
+    local mordor_host="${POSTGRES_HOST:-postgres}"
+    local mordor_port="${POSTGRES_PORT:-5432}"
+    local mordor_user="${POSTGRES_USER:-admin}"
+    local mordor_password="${POSTGRES_PASSWORD:-admin}"
+    local mordor_db="mordor"
+
+    if validate_db_connection "$mordor_host" "$mordor_port" "$mordor_user" "$mordor_password" "$mordor_db"; then
+        if ! backup_database "mordor" "$mordor_host" "$mordor_port" "$mordor_user" "$mordor_password" "$mordor_db" "$backup_date_dir"; then
+            backup_failed=1
+        fi
+    else
+        log_error "Skipping mordor backup due to connection failure"
+        backup_failed=1
+    fi
+
+    # Backup transactions database
+    local transactions_host="${TRANSACTIONS_HOST:-transactions}"
+    local transactions_port="${TRANSACTIONS_PORT:-5433}"
+    local transactions_user="${TRANSACTIONS_USER:-${POSTGRES_USER:-admin}}"
+    local transactions_password="${TRANSACTIONS_PASSWORD:-${POSTGRES_PASSWORD:-admin}}"
+    local transactions_db="transactions"
+
+    if validate_db_connection "$transactions_host" "$transactions_port" "$transactions_user" "$transactions_password" "$transactions_db"; then
+        if ! backup_database "transactions" "$transactions_host" "$transactions_port" "$transactions_user" "$transactions_password" "$transactions_db" "$backup_date_dir"; then
+            backup_failed=1
+        fi
+    else
+        log_warning "Skipping transactions backup due to connection failure"
+    fi
+
+    # ========== Volume Backups ==========
+    log "========== Starting Volume Backups =========="
+
+    if ! backup_volume "postgres-data" "financer-services_postgres_data" "$backup_date_dir"; then
+        backup_failed=1
+    fi
+
+    # ========== S3 Sync ==========
+    log "========== Starting S3 Sync =========="
+
+    if [ -n "$S3_BUCKET" ]; then
+        if ! sync_to_s3 "$backup_timestamp" "$S3_BUCKET"; then
+            backup_failed=1
+        fi
+    else
+        log_warning "S3_BUCKET environment variable not set, skipping S3 sync"
+    fi
+
+    # ========== Retention Policy ==========
+    log "========== Applying Retention Policy =========="
+
+    apply_retention_policy 5
+
+    # ========== Summary ==========
+    log "=========================================="
+
+    if [ $backup_failed -eq 0 ]; then
+        log_success "Backup orchestration completed successfully"
+        log "Backup location: $backup_date_dir"
+        log "Backup files:"
+        ls -lh "$backup_date_dir" | tail -n +2 | tee -a "$LOG_FILE"
+        log "=========================================="
+        exit 0
+    else
+        log_error "Backup orchestration completed with errors (see above)"
+        log "=========================================="
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"

@@ -1,0 +1,52 @@
+# Backup Configuration
+# Define all databases and volumes to backup
+
+backup_targets:
+  # First PostgreSQL instance (mordor database)
+  - name: "mordor"
+    type: "database"
+    enabled: true
+    config:
+      host: "postgres"
+      port: 5432
+      user: "${POSTGRES_USER}"
+      password: "${POSTGRES_PASSWORD}"
+      database: "mordor"
+
+  # Second PostgreSQL instance (transactions database)
+  - name: "transactions"
+    type: "database"
+    enabled: true
+    config:
+      host: "transactions"  # Change this to the actual service name if different
+      port: 5433
+      user: "${POSTGRES_USER}"
+      password: "${POSTGRES_PASSWORD}"
+      database: "transactions"
+
+# Docker volumes to backup
+volume_backups:
+  - name: "postgres-data"
+    enabled: true
+    volume_name: "financer-services_postgres_data"
+    description: "PostgreSQL data directory"
+
+# Global backup configuration
+backup_config:
+  # Number of backups to keep (deletes oldest when count exceeded)
+  retention_count: 5
+
+  # Local backup directory inside container
+  backup_dir: "/backups"
+
+  # S3 configuration
+  s3_enabled: true
+  s3_bucket: "${S3_BUCKET}"
+  s3_region: "${AWS_DEFAULT_REGION}"
+
+  # Backup schedule (cron format: minute hour day month weekday)
+  # Currently set to 3am daily (0 3 * * *)
+  schedule: "0 3 * * *"
+
+  # Compression level for tar backups (1-9, default 6)
+  compression_level: 6
