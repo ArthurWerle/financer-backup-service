@@ -14,7 +14,7 @@ services:
       - /mnt/sda/backups/financer:/backups
       # Configuration files
       - ./backups.yml:/backups/config/backups.yml:ro
-      - ./backup.sh:/backup.sh:ro
+      - ./backup.sh:/backup.sh
       # Docker socket for volume backups
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
