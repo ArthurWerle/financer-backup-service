@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-This is a Docker-based backup service for a PostgreSQL database (personal finances). It performs automated backups using `pg_dump` and syncs them to AWS S3 for redundancy.
+This is a simple Docker-based backup service for PostgreSQL databases. It performs automated backups using `pg_dump` and syncs them to AWS S3 for redundancy.
 
 ## Architecture
 
@@ -13,15 +13,14 @@ The service consists of one Docker container defined in `docker-compose.yml`:
 **backup-orchestrator**: Uses `postgres:15` image to run automated backups in a loop
    - Runs backup immediately on startup, then repeats at specified interval
    - Backup interval controlled by `BACKUP_INTERVAL` env var (default: 86400 seconds = 1 day)
-   - Performs database backups (pg_dump) for multiple databases:
+   - Performs database backups (pg_dump) for databases:
      - `mordor` database (main financer database)
-     - `transactions` database (optional)
-   - Performs Docker volume backups (tar.gz)
-   - Creates gzipped SQL dumps and tar archives in timestamped directories under `/backups`
+     - `transactions` database (optional, if `TRANSACTIONS_HOST` is set)
+   - Creates gzipped SQL dumps in timestamped directories under `/backups`
    - Automatically syncs backups to S3 after creation
    - Automatically keeps only the 5 most recent backup sets locally
    - Connects to external `financer-services_database` network
-   - Comprehensive logging to `/backups/logs/`
+   - All logs go to stdout/console (visible in Portainer/docker logs)
 
 ## Configuration
 
@@ -58,7 +57,6 @@ Backups are organized in timestamped directories: `/backups/YYYYMMDD_HHMMSS/`
 Each backup set contains:
 - `mordor_YYYYMMDD_HHMMSS.sql.gz` - Main database backup
 - `transactions_YYYYMMDD_HHMMSS.sql.gz` - Transactions database backup (if available)
-- `postgres-data_volume_YYYYMMDD_HHMMSS.tar.gz` - Volume backup
 
 Download from server:
 ```bash
@@ -74,8 +72,8 @@ gunzip -c YYYYMMDD_HHMMSS/mordor_*.sql.gz | psql -h localhost -U your-username -
 
 - Backups are stored at `/mnt/sda/backups/financer` on the host
 - The service connects to an external Docker network: `financer-services_database`
-- Backups are synced to S3 immediately after creation
+- Backups are synced to S3 immediately after creation (if `S3_BUCKET` is configured)
 - Local retention: 5 backup sets (older ones are automatically deleted)
 - First backup runs immediately on container startup
-- Logs are stored in `/mnt/sda/backups/financer/logs/`
-- The backup script validates database connections before attempting backups
+- All logs go to stdout (visible with `docker-compose logs -f`)
+- Simple and straightforward - perfect for Portainer deployment
