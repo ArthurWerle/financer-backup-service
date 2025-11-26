@@ -10,7 +10,7 @@ This is a simple Docker-based backup service for PostgreSQL databases. It perfor
 
 The service consists of one Docker container defined in `docker-compose.yml`:
 
-**backup-orchestrator**: Uses `postgres:15` image to run automated backups in a loop
+**backup-orchestrator**: Uses `postgres:16` image to run automated backups in a loop
    - Runs backup immediately on startup, then repeats at specified interval
    - Backup interval controlled by `BACKUP_INTERVAL` env var (default: 86400 seconds = 1 day)
    - Performs database backups (pg_dump) for databases:
