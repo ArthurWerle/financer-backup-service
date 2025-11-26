@@ -1,6 +1,6 @@
 services:
   backup-orchestrator:
-    image: postgres:15
+    image: postgres:16
     restart: unless-stopped
     env_file:
       - stack.env
