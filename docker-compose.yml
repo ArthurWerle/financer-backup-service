@@ -14,6 +14,7 @@ services:
     entrypoint: |
       /bin/bash -c '
       set -e
+      set -o pipefail
 
       echo "=========================================="
       echo "Installing backup tools..."
@@ -24,6 +25,13 @@ services:
       echo "Backup Service Started"
       echo "Timezone: America/Sao_Paulo"
       echo "Backup interval: $${BACKUP_INTERVAL} seconds"
+      echo ""
+      echo "Configuration:"
+      echo "  POSTGRES_HOST: $${POSTGRES_HOST}"
+      echo "  POSTGRES_PORT: $${POSTGRES_PORT:-5432}"
+      echo "  POSTGRES_USER: $${POSTGRES_USER}"
+      echo "  TRANSACTIONS_HOST: $${TRANSACTIONS_HOST:-(not set)}"
+      echo "  S3_BUCKET: $${S3_BUCKET:-(not set)}"
       echo "=========================================="
 
       while true; do
@@ -39,23 +47,44 @@ services:
 
         # Backup mordor database
         echo "[$(date +"%Y-%m-%d %H:%M:%S")] Backing up mordor database..."
+        echo "[$(date +"%Y-%m-%d %H:%M:%S")]   Host: $${POSTGRES_HOST}:$${POSTGRES_PORT:-5432}"
         export PGPASSWORD="$${POSTGRES_PASSWORD}"
-        if pg_dump -h "$${POSTGRES_HOST}" -p "$${POSTGRES_PORT:-5432}" -U "$${POSTGRES_USER}" mordor | gzip > "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz"; then
+
+        if pg_dump -h "$${POSTGRES_HOST}" -p "$${POSTGRES_PORT:-5432}" -U "$${POSTGRES_USER}" mordor 2>&1 | gzip > "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz"; then
           SIZE=$$(du -h "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz" | cut -f1)
-          echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✓ Mordor backup completed ($${SIZE})"
+          SIZE_BYTES=$$(stat -f%z "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz" 2>/dev/null || stat -c%s "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz")
+
+          # Check if backup is reasonably sized (> 10KB means it has actual data)
+          if [ $$SIZE_BYTES -gt 10240 ]; then
+            echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✓ Mordor backup completed ($${SIZE})"
+          else
+            echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✗ Mordor backup failed (file too small: $${SIZE})"
+            rm -f "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz"
+          fi
         else
           echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✗ Mordor backup failed"
+          rm -f "$${BACKUP_DIR}/mordor_$${TIMESTAMP}.sql.gz"
         fi
 
         # Backup transactions database (optional)
         if [ -n "$${TRANSACTIONS_HOST}" ]; then
           echo "[$(date +"%Y-%m-%d %H:%M:%S")] Backing up transactions database..."
+          echo "[$(date +"%Y-%m-%d %H:%M:%S")]   Host: $${TRANSACTIONS_HOST}:$${TRANSACTIONS_PORT:-5433}"
           export PGPASSWORD="$${TRANSACTIONS_PASSWORD:-$${POSTGRES_PASSWORD}}"
-          if pg_dump -h "$${TRANSACTIONS_HOST}" -p "$${TRANSACTIONS_PORT:-5433}" -U "$${TRANSACTIONS_USER:-$${POSTGRES_USER}}" transactions | gzip > "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz" 2>/dev/null; then
+
+          if pg_dump -h "$${TRANSACTIONS_HOST}" -p "$${TRANSACTIONS_PORT:-5433}" -U "$${TRANSACTIONS_USER:-$${POSTGRES_USER}}" transactions 2>&1 | gzip > "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz"; then
             SIZE=$$(du -h "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz" | cut -f1)
-            echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✓ Transactions backup completed ($${SIZE})"
+            SIZE_BYTES=$$(stat -f%z "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz" 2>/dev/null || stat -c%s "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz")
+
+            if [ $$SIZE_BYTES -gt 10240 ]; then
+              echo "[$(date +"%Y-%m-%d %H:%M:%S")] ✓ Transactions backup completed ($${SIZE})"
+            else
+              echo "[$(date +"%Y-%m-%d %H:%M:%S")] ⚠ Transactions backup failed (file too small: $${SIZE})"
+              rm -f "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz"
+            fi
           else
             echo "[$(date +"%Y-%m-%d %H:%M:%S")] ⚠ Transactions backup skipped (database not available)"
+            rm -f "$${BACKUP_DIR}/transactions_$${TIMESTAMP}.sql.gz"
           fi
         fi
 
