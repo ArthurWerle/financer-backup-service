@@ -25,7 +25,6 @@ services:
       apt-get update && apt-get install -y --no-install-recommends \
         awscli \
         docker.io \
-        cron \
         bash \
         >/dev/null 2>&1 || {
           echo "Failed to install packages" >&2
@@ -35,20 +34,32 @@ services:
       # Make backup script executable
       chmod +x /backup.sh
 
-      # Create cron job for daily backup at 3am
-      CRON_JOB="0 3 * * * /backup.sh"
-      echo "$$CRON_JOB" | crontab -
+      # Use BACKUP_INTERVAL with default of 86400 seconds (1 day)
+      INTERVAL=$${BACKUP_INTERVAL:-86400}
 
       echo "=========================================="
       echo "Backup orchestrator started"
       echo "Timezone: $$TZ"
       echo "Backup directory: $$BACKUP_DIR"
       echo "Configuration file: $$CONFIG_FILE"
-      echo "Cron job: $$CRON_JOB"
+      echo "Backup interval: $$INTERVAL seconds ($$(( INTERVAL / 3600 )) hours)"
       echo "=========================================="
 
-      # Start cron daemon in foreground
-      exec cron -f
+      # Run backup loop
+      while true; do
+        echo "[$(date +'\''%Y-%m-%d %H:%M:%S'\'')] Running backup..."
+        /backup.sh
+        BACKUP_EXIT_CODE=$$?
+
+        if [ $$BACKUP_EXIT_CODE -eq 0 ]; then
+          echo "[$(date +'\''%Y-%m-%d %H:%M:%S'\'')] Backup completed successfully"
+        else
+          echo "[$(date +'\''%Y-%m-%d %H:%M:%S'\'')] Backup failed with exit code $$BACKUP_EXIT_CODE"
+        fi
+
+        echo "[$(date +'\''%Y-%m-%d %H:%M:%S'\'')] Sleeping for $$INTERVAL seconds (next backup at $(date -d "@$$(( $$(date +%s) + INTERVAL ))" +'\''%Y-%m-%d %H:%M:%S'\''))"
+        sleep $$INTERVAL
+      done
       '
 
 networks:

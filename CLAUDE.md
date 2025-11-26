@@ -8,26 +8,31 @@ This is a Docker-based backup service for a PostgreSQL database (personal financ
 
 ## Architecture
 
-The service consists of two Docker containers defined in `docker-compose.yml`:
+The service consists of one Docker container defined in `docker-compose.yml`:
 
-1. **backup**: Uses `postgres:15` image to run weekly `pg_dump` operations
-   - Creates gzipped SQL dumps in `/backups` (mounted from `/mnt/sda/backups/financer`)
-   - Automatically keeps only the 4 most recent backups locally
-   - Backup interval controlled by `BACKUP_INTERVAL` env var (default: 604800 seconds = 1 week)
+**backup-orchestrator**: Uses `postgres:15` image to run automated backups in a loop
+   - Runs backup immediately on startup, then repeats at specified interval
+   - Backup interval controlled by `BACKUP_INTERVAL` env var (default: 86400 seconds = 1 day)
+   - Performs database backups (pg_dump) for multiple databases:
+     - `mordor` database (main financer database)
+     - `transactions` database (optional)
+   - Performs Docker volume backups (tar.gz)
+   - Creates gzipped SQL dumps and tar archives in timestamped directories under `/backups`
+   - Automatically syncs backups to S3 after creation
+   - Automatically keeps only the 5 most recent backup sets locally
    - Connects to external `financer-services_database` network
-
-2. **s3-uploader**: Uses `alpine:latest` to sync backups to S3
-   - Watches `/backups` directory using `inotifywait`
-   - Automatically syncs new `.sql.gz` files to S3 when created
-   - Performs initial sync on startup
-   - Requires AWS credentials and `S3_BUCKET` env var
+   - Comprehensive logging to `/backups/logs/`
 
 ## Configuration
 
 All configuration is in `stack.env`:
-- Database connection: `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- Database connection: `POSTGRES_HOST`, `POSTGRES_USER`, `POSTGRES_PASSWORD` (for mordor database)
+- Transactions DB (optional): `TRANSACTIONS_HOST`, `TRANSACTIONS_PORT`, `TRANSACTIONS_USER`, `TRANSACTIONS_PASSWORD`
 - AWS credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `S3_BUCKET`
-- Backup frequency: `BACKUP_INTERVAL` (in seconds)
+- Backup frequency: `BACKUP_INTERVAL` (in seconds, default: 86400 = daily)
+  - Daily backups: 86400
+  - Weekly backups: 604800
+  - Twice daily: 43200
 
 ## Running the Service
 
@@ -38,8 +43,7 @@ docker-compose up -d
 
 View logs:
 ```bash
-docker-compose logs -f backup
-docker-compose logs -f s3-uploader
+docker-compose logs -f backup-orchestrator
 ```
 
 Stop the service:
@@ -49,21 +53,29 @@ docker-compose down
 
 ## Restoring Backups
 
-Backup files are named: `backup_mordor_YYYYMMDD_HHMMSS.sql.gz`
+Backups are organized in timestamped directories: `/backups/YYYYMMDD_HHMMSS/`
+
+Each backup set contains:
+- `mordor_YYYYMMDD_HHMMSS.sql.gz` - Main database backup
+- `transactions_YYYYMMDD_HHMMSS.sql.gz` - Transactions database backup (if available)
+- `postgres-data_volume_YYYYMMDD_HHMMSS.tar.gz` - Volume backup
 
 Download from server:
 ```bash
-scp your-username@your-server:/mnt/sda/backups/financer/backup_mordor_*.sql.gz ./
+scp -r your-username@your-server:/mnt/sda/backups/financer/YYYYMMDD_HHMMSS ./
 ```
 
-Restore to database:
+Restore database:
 ```bash
-gunzip -c backup_mordor_YYYYMMDD_HHMMSS.sql.gz | psql -h localhost -U your-username -d your-database
+gunzip -c YYYYMMDD_HHMMSS/mordor_*.sql.gz | psql -h localhost -U your-username -d mordor
 ```
 
 ## Important Notes
 
 - Backups are stored at `/mnt/sda/backups/financer` on the host
 - The service connects to an external Docker network: `financer-services_database`
-- Only files matching `backup_*.sql.gz` are synced to S3
-- Local retention: 4 backups (older ones are automatically deleted)
+- Backups are synced to S3 immediately after creation
+- Local retention: 5 backup sets (older ones are automatically deleted)
+- First backup runs immediately on container startup
+- Logs are stored in `/mnt/sda/backups/financer/logs/`
+- The backup script validates database connections before attempting backups
